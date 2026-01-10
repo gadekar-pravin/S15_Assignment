@@ -12,6 +12,11 @@ from agents.base_agent import AgentRunner
 console = Console()
 
 async def main():
+    """
+    Runs an "Acid Test" for the PlannerAgent.
+    The goal is to verify if the PlannerAgent can correctly generate a plan that utilizes
+    ALL available agent types when given a complex prompt that requires them.
+    """
     console.print("[bold cyan]🚀 Starting Planner Acid Test (All Agents)[/bold cyan]")
     
     multi_mcp = MultiMCP()

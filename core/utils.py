@@ -5,17 +5,39 @@ from rich.table import Table
 from rich.text import Text
 
 def log_step(title: str, payload=None, symbol: str = "🟢"):
+    """
+    Logs a step in the execution process with a title and optional payload.
+
+    Args:
+        title (str): The title of the step.
+        payload (Any, optional): Data to display (will be pretty-printed). Defaults to None.
+        symbol (str, optional): An emoji symbol to prefix the title. Defaults to "🟢".
+    """
     print(f"\n[b]{symbol} {title}[/b]")
     if payload:
         from pprint import pprint
         pprint(payload)
 
 def log_error(message: str, err: Exception = None):
+    """
+    Logs an error message and optional exception details.
+
+    Args:
+        message (str): The error message.
+        err (Exception, optional): The exception object, if any. Defaults to None.
+    """
     print(f"\n[red]❌ {message}[/red]")
     if err:
         print(f"[dim]{str(err)}[/dim]")
 
 def log_json_block(title: str, block):
+    """
+    Logs a JSON-like object (dict or list) in a styled panel.
+
+    Args:
+        title (str): The title of the panel.
+        block (dict | list | Any): The data object to display.
+    """
     from rich.panel import Panel
     from rich.console import Console
 
@@ -57,6 +79,13 @@ def log_json_block(title: str, block):
 
 
 def render_graph(graph, depth=1):
+    """
+    Renders a visual representation of the agent execution graph (NetworkX DiGraph).
+
+    Args:
+        graph (networkx.DiGraph): The graph to render.
+        depth (int, optional): The level of detail to display (1, 2, or more). Defaults to 1.
+    """
     from rich.panel import Panel
     from rich.table import Table
     from rich.console import Console
@@ -131,6 +160,16 @@ from datetime import datetime
 from rich import print
 
 def get_log_folder(session_id: str, base_dir: str = None) -> Path:
+    """
+    Creates and returns a directory path for storing logs, organized by date.
+
+    Args:
+        session_id (str): The unique identifier for the session (unused in path construction but kept for interface).
+        base_dir (str, optional): The base directory for logs. Defaults to 'memory/session_logs' relative to the repo root.
+
+    Returns:
+        Path: The path to the created log folder.
+    """
     if base_dir is None:
         base_dir = Path(__file__).parent.parent / "memory" / "session_logs"
     now = datetime.now()
@@ -139,12 +178,27 @@ def get_log_folder(session_id: str, base_dir: str = None) -> Path:
     return folder
 
 def save_json_log(obj: dict, path: Path):
+    """
+    Saves a dictionary to a JSON file.
+
+    Args:
+        obj (dict): The data to save.
+        path (Path): The file path where the JSON will be saved.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
     print(f"\n\n[green]📝 Saved JSON log:[/green] {path}\n")
 
 def append_step_log(session_id: str, step_data: dict, base_dir: str = None):
+    """
+    Appends a step execution log to a session-specific JSON file.
+
+    Args:
+        session_id (str): The session identifier.
+        step_data (dict): The data regarding the step to log.
+        base_dir (str, optional): Base directory for logs. Defaults to None.
+    """
     folder = get_log_folder(session_id, base_dir)
     step_path = folder / f"{session_id}_steps.json"
     if step_path.exists():
@@ -159,6 +213,14 @@ def append_step_log(session_id: str, step_data: dict, base_dir: str = None):
     print(f"[cyan]🔄 Step log updated:[/cyan] {step_path}")
 
 def save_final_plan(session_id: str, final_data: dict, base_dir: str = None):
+    """
+    Saves the final execution plan to a JSON file.
+
+    Args:
+        session_id (str): The session identifier.
+        final_data (dict): The final plan data to save.
+        base_dir (str, optional): Base directory for logs. Defaults to None.
+    """
     folder = get_log_folder(session_id, base_dir)
     plan_path = folder / f"{session_id}.json"
     save_json_log(final_data, plan_path)

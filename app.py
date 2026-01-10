@@ -18,7 +18,16 @@ import argparse
 # ... existing code ...
 
 async def run_query(agent_loop, query):
-    """Helper to run a query and get text output"""
+    """
+    Helper to run a query through the agent loop and retrieve the final text output.
+
+    Args:
+        agent_loop (AgentLoop4): The initialized agent loop instance.
+        query (str): The user's query.
+
+    Returns:
+        str: The final output summary or result.
+    """
     context = await agent_loop.run(
         query=query,
         file_manifest=[],
@@ -36,6 +45,10 @@ async def run_query(agent_loop, query):
     return "No output produced."
 
 async def main():
+    """
+    Main entry point for the application.
+    Parses arguments, initializes services, and starts the interactive loop or UI.
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("--ui", action="store_true", help="Launch Web UI")
     args = parser.parse_args()

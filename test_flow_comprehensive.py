@@ -12,6 +12,10 @@ from mcp_servers.multi_mcp import MultiMCP
 console = Console()
 
 async def main():
+    """
+    Runs a comprehensive system flow test to verify the functionality of multiple agents and components.
+    Simulates a complex user query that triggers various agents (Retriever, Thinker, Distiller, Coder, Clarification, Formatter, QAAgent).
+    """
     console.print("[bold cyan]🚀 Starting Comprehensive System Flow Test[/bold cyan]")
     
     multi_mcp = MultiMCP()
@@ -54,7 +58,7 @@ async def main():
         
         # Check Agent Coverage
         executed_steps = context.plan_graph.nodes(data=True)
-        agents_used = {data['agent'] for _, data in executed_steps}
+        agents_used = {data.get('agent', 'Unknown') for _, data in executed_steps}
         
         console.print(f"\n[bold]Agents Used:[/bold] {agents_used}")
         

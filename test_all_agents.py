@@ -12,6 +12,18 @@ from agents.base_agent import AgentRunner
 console = Console()
 
 async def run_test(runner, agent_name, task_input, expected_key=None):
+    """
+    Runs a test for a single agent.
+
+    Args:
+        runner (AgentRunner): The agent runner instance.
+        agent_name (str): The name of the agent to test.
+        task_input (dict): The input data for the agent.
+        expected_key (str, optional): A key expected in the output to verify success.
+
+    Returns:
+        bool: True if the test passed, False otherwise.
+    """
     console.print(f"\n[bold yellow]🧪 Testing {agent_name}...[/bold yellow]")
     console.print(f"[dim]Input: {task_input.get('agent_prompt', 'N/A')}[/dim]")
     
@@ -44,6 +56,10 @@ async def run_test(runner, agent_name, task_input, expected_key=None):
         return False
 
 async def main():
+    """
+    Main function to run the comprehensive agent verification suite.
+    Iterates through all defined agents and runs a basic test case for each.
+    """
     console.print("[bold cyan]🚀 Starting Comprehensive Agent Verification Suite[/bold cyan]")
     
     # Start MultiMCP for tools

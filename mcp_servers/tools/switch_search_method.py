@@ -23,11 +23,26 @@ SEARCH_ENGINES = [
 ]
 
 class RateLimiter:
+    """
+    A simple rate limiter to prevent making requests too frequently to the same engine.
+    """
     def __init__(self, cooldown_seconds=2):
+        """
+        Initializes the RateLimiter.
+
+        Args:
+            cooldown_seconds (int, optional): Minimum time in seconds between requests to the same key. Defaults to 2.
+        """
         self.cooldown = timedelta(seconds=cooldown_seconds)
         self.last_called = {}
 
     async def acquire(self, key: str):
+        """
+        Acquires permission to proceed for a given key. Sleeps if within the cooldown period.
+
+        Args:
+            key (str): The identifier for the resource (e.g., search engine name).
+        """
         now = datetime.now()
         last = self.last_called.get(key)
         if last and (now - last) < self.cooldown:
@@ -39,6 +54,12 @@ class RateLimiter:
 rate_limiter = RateLimiter(cooldown_seconds=2)
 
 def get_random_headers():
+    """
+    Generates random HTTP headers to mimic a real browser.
+
+    Returns:
+        dict: Headers dictionary.
+    """
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 Chrome/113.0.5672.92 Safari/537.36",
@@ -54,6 +75,15 @@ def get_random_headers():
     return {"User-Agent": random.choice(user_agents)}
 
 async def use_duckduckgo_http(query: str) -> List[str]:
+    """
+    Performs a search using DuckDuckGo HTML interface via HTTP requests.
+
+    Args:
+        query (str): The search query.
+
+    Returns:
+        List[str]: A list of result URLs.
+    """
     await rate_limiter.acquire("duck_http")
     url = "https://html.duckduckgo.com/html"
     headers = get_random_headers()
@@ -82,6 +112,17 @@ async def use_duckduckgo_http(query: str) -> List[str]:
         return links
 
 async def use_playwright_search(query: str, engine: str) -> List[str]:
+    """
+    Performs a search using a headless browser (Playwright) on various search engines.
+    Useful when simple HTTP requests are blocked or require JS.
+
+    Args:
+        query (str): The search query.
+        engine (str): The identifier of the search engine to use (e.g., 'duck_playwright').
+
+    Returns:
+        List[str]: A list of result URLs.
+    """
     await rate_limiter.acquire(engine)
     urls = []
     async with async_playwright() as p:
@@ -164,6 +205,17 @@ async def use_playwright_search(query: str, engine: str) -> List[str]:
     return urls
 
 async def smart_search(query: str, limit: int = 5) -> List[str]:
+    """
+    Performs a robust search by trying multiple engines in random order.
+    Attempts to bypass blocks and fall back to different providers.
+
+    Args:
+        query (str): The search query.
+        limit (int, optional): Maximum number of results to return. Defaults to 5.
+
+    Returns:
+        List[str]: A list of result URLs.
+    """
     random.shuffle(SEARCH_ENGINES)
 
     for engine in SEARCH_ENGINES:

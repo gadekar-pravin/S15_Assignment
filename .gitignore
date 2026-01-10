@@ -55,3 +55,7 @@ mcp_servers/documents/*.gz
 # Gemini/Brain
 .gemini/
 
+# Environment variables
+.env
+.env.local
+.env.*.local

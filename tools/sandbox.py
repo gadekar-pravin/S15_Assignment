@@ -21,22 +21,22 @@ ALLOWED_MODULES = {
 SAFE_BUILTINS = [
     # Core types and structure
     "bool", "int", "float", "str", "list", "dict", "set", "tuple", "complex",
-    
+
     # Iteration and collection helpers
     "range", "enumerate", "zip", "map", "filter", "reversed", "next",
-    
+
     # Logic and math
     "abs", "round", "divmod", "pow", "sum", "min", "max", "all", "any",
-    
+
     # String and character
     "ord", "chr", "len", "sorted",
-    
+
     # Type inspection
     "isinstance", "issubclass", "type", "id",
-    
+
     # Functional
     "callable", "hash", "format",
-    
+
     # Import-related
     "__import__",
 
@@ -48,8 +48,20 @@ MAX_FUNCTIONS = 20
 TIMEOUT_PER_FUNCTION = 50
 
 class KeywordStripper(ast.NodeTransformer):
-    """Rewrite all function calls to remove keyword args and keep only values as positional."""
+    """
+    AST Transformer that rewrites function calls to remove keyword arguments.
+    It converts keyword arguments into positional arguments, discarding the keys.
+    """
     def visit_Call(self, node):
+        """
+        Visits Call nodes in the AST and transforms keyword arguments.
+
+        Args:
+            node (ast.Call): The function call node.
+
+        Returns:
+            ast.Call: The transformed node with only positional arguments.
+        """
         self.generic_visit(node)
         if node.keywords:
             # Convert all keyword arguments into positional args (discard names)
@@ -63,10 +75,28 @@ class KeywordStripper(ast.NodeTransformer):
 # AST TRANSFORMER: auto-await known async MCP tools
 # ───────────────────────────────────────────────────────────────
 class AwaitTransformer(ast.NodeTransformer):
+    """
+    AST Transformer that automatically adds `await` to calls of known async functions (MCP tools).
+    """
     def __init__(self, async_funcs):
+        """
+        Initializes the AwaitTransformer.
+
+        Args:
+            async_funcs (set): A set of function names that should be awaited.
+        """
         self.async_funcs = async_funcs
 
     def visit_Call(self, node):
+        """
+        Visits Call nodes and wraps them in `await` if the function name is in `async_funcs`.
+
+        Args:
+            node (ast.Call): The function call node.
+
+        Returns:
+            ast.Await | ast.Call: The potentially transformed node.
+        """
         self.generic_visit(node)
         if isinstance(node.func, ast.Name) and node.func.id in self.async_funcs:
             return ast.Await(value=node)
@@ -75,6 +105,15 @@ class AwaitTransformer(ast.NodeTransformer):
 
 
 def fix_unterminated_triple_quotes(code: str) -> str:
+    """
+    Detects and fixes unterminated triple quotes in the code string.
+
+    Args:
+        code (str): The source code.
+
+    Returns:
+        str: The corrected code.
+    """
     import re
     triple_quotes = re.findall(r'''"""''', code)
     if len(triple_quotes) % 2 != 0:
@@ -84,6 +123,17 @@ def fix_unterminated_triple_quotes(code: str) -> str:
 
 
 def build_safe_globals(mcp_funcs: dict, multi_mcp=None, session_id: str = None) -> dict:
+    """
+    Constructs a dictionary of safe global variables and functions for the sandbox.
+
+    Args:
+        mcp_funcs (dict): Dictionary of MCP tool functions.
+        multi_mcp (MultiMCP, optional): The MultiMCP instance for parallel execution.
+        session_id (str, optional): The session ID to load persistent variables.
+
+    Returns:
+        dict: The global environment for execution.
+    """
     safe_globals = {
         "__builtins__": {
             k: getattr(builtins, k) for k in SAFE_BUILTINS
@@ -114,6 +164,13 @@ def build_safe_globals(mcp_funcs: dict, multi_mcp=None, session_id: str = None) 
 
 
 def save_session_vars(session_id: str, variables: dict):
+    """
+    Saves session variables to a JSON file for persistence.
+
+    Args:
+        session_id (str): The session identifier.
+        variables (dict): The variables to save.
+    """
     os.makedirs("action/sandbox_state", exist_ok=True)
     path = f"action/sandbox_state/{session_id}.json"
 
@@ -132,6 +189,15 @@ def save_session_vars(session_id: str, variables: dict):
 
 
 def load_session_vars(session_id: str) -> dict:
+    """
+    Loads session variables from a JSON file.
+
+    Args:
+        session_id (str): The session identifier.
+
+    Returns:
+        dict: The loaded variables.
+    """
     try:
         with open(f"action/sandbox_state/{session_id}.json", "r", encoding="utf-8") as f:
             return json.load(f)
@@ -140,16 +206,47 @@ def load_session_vars(session_id: str) -> dict:
 
 
 def count_function_calls(code: str) -> int:
+    """
+    Counts the number of function calls in the given code.
+
+    Args:
+        code (str): The source code.
+
+    Returns:
+        int: The number of function calls.
+    """
     tree = ast.parse(code)
     return sum(isinstance(node, ast.Call) for node in ast.walk(tree))
 
 
 def make_tool_proxy(tool_name: str, mcp):
+    """
+    Creates an async wrapper function for an MCP tool.
+
+    Args:
+        tool_name (str): The name of the tool.
+        mcp: The MCP instance.
+
+    Returns:
+        function: An async function calling the MCP tool.
+    """
     async def _tool_fn(*args):
         return await mcp.function_wrapper(tool_name, *args)
     return _tool_fn
 
 async def run_user_code(code: str, multi_mcp, session_id: str = "default_session") -> dict:
+    """
+    Executes user-provided Python code in a sandboxed environment.
+    Applies AST transformations for safety and async compatibility.
+
+    Args:
+        code (str): The Python code to execute.
+        multi_mcp: The MultiMCP instance for tool execution.
+        session_id (str, optional): The session ID. Defaults to "default_session".
+
+    Returns:
+        dict: A dictionary containing execution results, status, error, and timing info.
+    """
     start_time = time.perf_counter()
     start_timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -233,7 +330,7 @@ async def run_user_code(code: str, multi_mcp, session_id: str = "default_session
         )
         wrapper = ast.Module(body=[func_def], type_ignores=[])
         ast.fix_missing_locations(wrapper)
-        
+
 
         compiled = compile(wrapper, filename="<user_code>", mode="exec")
         exec(compiled, sandbox, local_vars)
@@ -243,7 +340,7 @@ async def run_user_code(code: str, multi_mcp, session_id: str = "default_session
         returned = await asyncio.wait_for(local_vars["__main"](), timeout=timeout)
 
         result_value = {}
-        
+
 
         def serialize_result(v):
             if isinstance(v, (str, int, float, bool, type(None), list, dict)):
@@ -262,7 +359,7 @@ async def run_user_code(code: str, multi_mcp, session_id: str = "default_session
             result_value = {"result": serialize_result(returned["result"])}
         if isinstance(returned, dict):
             result_value = {k: serialize_result(v) for k, v in returned.items()}
-            
+
             # Check for MCP tool failures or error messages
             for v in result_value.values():
                 if isinstance(v, str) and (
@@ -271,12 +368,12 @@ async def run_user_code(code: str, multi_mcp, session_id: str = "default_session
                     "failed" in v.lower()
                 ):
                     return {
-                        "status": "error", 
+                        "status": "error",
                         "error": v,
                         "execution_time": start_timestamp,
                         "total_time": str(round(time.perf_counter() - start_time, 3))
                     }
-            
+
             # Check if any MCP tool returned success=False
             for k, v in returned.items():
                 if hasattr(v, "success") and not v.success:
@@ -293,7 +390,7 @@ async def run_user_code(code: str, multi_mcp, session_id: str = "default_session
 
         # import pdb; pdb.set_trace()
 
-        
+
 
         log_json_block("Executor result", result_value)
 

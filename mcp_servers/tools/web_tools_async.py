@@ -17,6 +17,12 @@ def print(*args, **kwargs):
 DIFFICULT_WEBSITES_PATH = Path(__file__).parent / "difficult_websites.txt"
 
 def get_random_headers():
+    """
+    Returns a dictionary with a random User-Agent header.
+
+    Returns:
+        dict: Headers dictionary with a 'User-Agent' key.
+    """
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_4) AppleWebKit/537.36 Chrome/113.0.5672.92 Safari/537.36",
@@ -33,6 +39,15 @@ def get_random_headers():
 
 
 def is_difficult_website(url: str) -> bool:
+    """
+    Checks if a URL belongs to a list of known difficult websites that require advanced scraping.
+
+    Args:
+        url (str): The URL to check.
+
+    Returns:
+        bool: True if the website is in the difficult list, False otherwise.
+    """
     if not DIFFICULT_WEBSITES_PATH.exists():
         return False
     try:
@@ -45,9 +60,29 @@ def is_difficult_website(url: str) -> bool:
 
 # Make sure these utilities exist
 def ascii_only(text: str) -> str:
+    """
+    Removes non-ASCII characters from a string.
+
+    Args:
+        text (str): Input text.
+
+    Returns:
+        str: Text with only ASCII characters.
+    """
     return text.encode("ascii", errors="ignore").decode()
 
 def choose_best_text(visible, main, trafilatura_):
+    """
+    Selects the best text extraction result based on length.
+
+    Args:
+        visible (str): Text extracted from visible elements.
+        main (str): Text extracted using readability.
+        trafilatura_ (str): Text extracted using trafilatura.
+
+    Returns:
+        tuple: (best_text, source_name)
+    """
     # Simple heuristic: prefer main if long, fallback otherwise
     scores = {
         "visible": len(visible.strip()),
@@ -62,6 +97,17 @@ def choose_best_text(visible, main, trafilatura_):
     }[best], best
 
 async def web_tool_playwright(url: str, max_total_wait: int = 15) -> dict:
+    """
+    Extracts content from a URL using Playwright (headless browser).
+    Useful for JavaScript-heavy websites.
+
+    Args:
+        url (str): The URL to scrape.
+        max_total_wait (int, optional): Maximum wait time. Defaults to 15.
+
+    Returns:
+        dict: Extracted content including title, HTML, and text.
+    """
     result = {"url": url}
 
     try:
@@ -152,6 +198,18 @@ async def web_tool_playwright(url: str, max_total_wait: int = 15) -> dict:
 import httpx
 
 async def smart_web_extract(url: str, timeout: int = 5) -> dict:
+    """
+    Intelligently extracts content from a URL.
+    First tries a fast HTTP request using httpx. If that fails or yields insufficient content,
+    falls back to a full browser scrape using Playwright.
+
+    Args:
+        url (str): The URL to scrape.
+        timeout (int, optional): Timeout for the HTTP request. Defaults to 5.
+
+    Returns:
+        dict: The extracted content.
+    """
 
     headers = get_random_headers()
 

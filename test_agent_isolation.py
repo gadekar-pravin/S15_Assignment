@@ -11,6 +11,10 @@ from mcp_servers.multi_mcp import MultiMCP
 from agents.base_agent import AgentRunner
 
 async def main():
+    """
+    Tests the isolation and basic functionality of the RetrieverAgent.
+    Attempts to run a simple retrieval task and verify the output.
+    """
     print("[bold blue]🧪 Testing CoderAgent Isolation...[/bold blue]")
     
     # 1. Start MultiMCP

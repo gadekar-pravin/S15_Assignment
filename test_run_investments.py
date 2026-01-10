@@ -4,6 +4,11 @@ import asyncio
 from rich.console import Console
 
 async def main():
+    """
+    Runs a test scenario focused on investment research.
+    Queries for startup investments in India and expects a markdown report.
+    This test verifies the system's ability to handle research, data aggregation, and formatting.
+    """
     multi_mcp = MultiMCP()
     console = Console()
     

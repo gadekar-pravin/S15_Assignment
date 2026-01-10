@@ -10,6 +10,10 @@ from core.loop import AgentLoop4
 from mcp_servers.multi_mcp import MultiMCP
 
 async def main():
+    """
+    Executes a basic verification run of the agent system.
+    Runs a simple query ("Plan a 3 day trip to Tokyo") and checks for successful completion.
+    """
     print("TEST: Starting Verification Run")
     multi_mcp = MultiMCP()
     await multi_mcp.start()

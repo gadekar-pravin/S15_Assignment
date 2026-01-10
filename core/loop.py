@@ -12,12 +12,39 @@ from rich.console import Console
 from datetime import datetime
 
 class AgentLoop4:
+    """
+    Main execution loop for the agent system using a NetworkX graph-based approach.
+    Orchestrates the planning and execution of tasks.
+    """
+
     def __init__(self, multi_mcp, strategy="conservative"):
+        """
+        Initializes the AgentLoop4.
+
+        Args:
+            multi_mcp: The MultiMCP instance for tool execution.
+            strategy (str, optional): The planning strategy to use. Defaults to "conservative".
+        """
         self.multi_mcp = multi_mcp
         self.strategy = strategy
         self.agent_runner = AgentRunner(multi_mcp)
 
     async def run(self, query, file_manifest, globals_schema, uploaded_files):
+        """
+        Runs the full agent workflow: File profiling, Planning, and Graph Execution.
+
+        Args:
+            query (str): The user's input query.
+            file_manifest (list): Metadata about available files.
+            globals_schema (dict): Schema for global variables.
+            uploaded_files (list): List of files uploaded by the user.
+
+        Returns:
+            ExecutionContextManager: The context manager containing the final state and outputs.
+
+        Raises:
+            RuntimeError: If planning or graph creation fails.
+        """
         # Phase 1: File Profiling (if files exist)
         file_profiles = {}
         if uploaded_files:
@@ -51,7 +78,7 @@ class AgentLoop4:
         # Check if plan_graph exists
         if 'plan_graph' not in plan_result['output']:
             raise RuntimeError(f"PlannerAgent output missing 'plan_graph' key. Got: {list(plan_result['output'].keys())}")
-        
+
         plan_graph = plan_result["output"]["plan_graph"]
 
         try:
@@ -62,10 +89,10 @@ class AgentLoop4:
                 original_query=query,
                 file_manifest=file_manifest
             )
-            
+
             # Add multi_mcp reference
             context.multi_mcp = self.multi_mcp
-            
+
             # Initialize graph with file profiles and globals
             context.set_file_profiles(file_profiles)
             context.plan_graph.graph['globals_schema'].update(globals_schema)
@@ -83,12 +110,18 @@ class AgentLoop4:
             raise
 
     async def _execute_dag(self, context):
-        """Execute DAG with visualization - DEBUGGING MODE"""
-        
+        """
+        Executes the Directed Acyclic Graph (DAG) of tasks.
+        Manages task dependencies, visualization, and parallel execution.
+
+        Args:
+            context (ExecutionContextManager): The execution context managing the graph state.
+        """
+
         # Get plan_graph structure for visualization
         plan_graph = {
             "nodes": [
-                {"id": node_id, **node_data} 
+                {"id": node_id, **node_data}
                 for node_id, node_data in context.plan_graph.nodes(data=True)
             ],
             "links": [
@@ -96,28 +129,28 @@ class AgentLoop4:
                 for source, target in context.plan_graph.edges()
             ]
         }
-        
+
         # Create visualizer
         visualizer = ExecutionVisualizer(plan_graph)
         console = Console()
-        
+
         # 🔧 DEBUGGING MODE: No Live display, just regular prints
         max_iterations = 20
         iteration = 0
 
         while not context.all_done() and iteration < max_iterations:
             iteration += 1
-            
+
             # Show current state
             console.print(visualizer.get_layout())
-            
+
             # Get ready nodes
             ready_steps = context.get_ready_steps()
-            
+
             if not ready_steps:
                 # Check for failures
                 has_failures = any(
-                    context.plan_graph.nodes[n]['status'] == 'failed' 
+                    context.plan_graph.nodes[n]['status'] == 'failed'
                     for n in context.plan_graph.nodes
                 )
                 if has_failures:
@@ -129,7 +162,7 @@ class AgentLoop4:
             for step_id in ready_steps:
                 visualizer.mark_running(step_id)
                 context.mark_running(step_id)
-            
+
             # ✅ EXECUTE AGENTS FOR REAL
             tasks = []
             for step_id in ready_steps:
@@ -137,7 +170,7 @@ class AgentLoop4:
                 step_data = context.get_step_data(step_id)
                 desc = step_data.get("agent_prompt", step_data.get("description", "No description"))[:60]
                 log_step(f"🔄 Starting {step_id} ({step_data['agent']}): {desc}...", symbol="🚀")
-                
+
                 visualizer.mark_running(step_id)
                 context.mark_running(step_id)
                 tasks.append(self._execute_step(step_id, context))
@@ -162,18 +195,28 @@ class AgentLoop4:
 
         # Final state
         console.print(visualizer.get_layout())
-        
+
         if context.all_done():
             console.print("🎉 All tasks completed!")
 
     async def _execute_step(self, step_id, context):
-        """Execute a single step with call_self support"""
+        """
+        Executes a single step (node) in the graph using the appropriate agent.
+        Handles ReAct loops (tool calls) and self-correction.
+
+        Args:
+            step_id (str): The ID of the step to execute.
+            context (ExecutionContextManager): The execution context.
+
+        Returns:
+            dict: The result of the step execution (success status and output).
+        """
         step_data = context.get_step_data(step_id)
         agent_type = step_data["agent"]
-        
+
         # Get inputs from NetworkX graph
         inputs = context.get_inputs(step_data.get("reads", []))
-        
+
         # 🔧 HELPER FUNCTION: Build agent input (consistent for both iterations)
         def build_agent_input(instruction=None, previous_output=None, iteration_context=None):
             if agent_type == "FormatterAgent":
@@ -209,35 +252,35 @@ class AgentLoop4:
         max_turns = 15
         current_input = build_agent_input()
         iterations_data = []
-        
+
         for turn in range(1, max_turns + 1):
             log_step(f"🔄 {agent_type} Iteration {turn}/{max_turns}", symbol="🔄")
-            
+
             # Run Agent
             result = await self.agent_runner.run_agent(agent_type, current_input)
-            
+
             if not result["success"]:
                 return result
-            
+
             output = result["output"]
             iterations_data.append({"iteration": turn, "output": output})
-            
+
             # Update step data with iterations so far
             step_data = context.get_step_data(step_id)
             step_data['iterations'] = iterations_data
-            
+
             # 1. Check for 'call_tool' (ReAct)
             if output.get("call_tool"):
                 tool_call = output["call_tool"]
                 tool_name = tool_call.get("name")
                 tool_args = tool_call.get("arguments", {})
-                
+
                 log_step(f"🛠️ Executing Tool: {tool_name}", payload=tool_args, symbol="⚙️")
-                
+
                 try:
                     # Execute tool via MultiMCP
                     tool_result = await self.multi_mcp.route_tool_call(tool_name, tool_args)
-                    
+
                     # Serialize result content
                     if isinstance(tool_result.content, list):
                         result_str = "\n".join([str(item.text) for item in tool_result.content if hasattr(item, "text")])
@@ -246,7 +289,7 @@ class AgentLoop4:
 
                     # Log result (truncated)
                     log_step(f"✅ Tool Result", payload={"result_preview": result_str[:200] + "..."}, symbol="🔌")
-                    
+
                     # Prepare input for next iteration
                     instruction = output.get("thought", "Use the tool result to generate the final output.")
                     if turn == max_turns - 1:
@@ -277,7 +320,7 @@ class AgentLoop4:
                     if execution_result.get("status") == "success":
                         execution_data = execution_result.get("result", {})
                         inputs = {**inputs, **execution_data}  # Update inputs for iteration 2
-                
+
                 # Prepare input for next iteration
                 current_input = build_agent_input(
                     instruction=output.get("next_instruction", "Continue the task"),
@@ -289,7 +332,7 @@ class AgentLoop4:
             # 3. Success (No tool call, just output)
             else:
                 return result
-        
+
         # If loop finishes without returning (max turns reached): Return PARTIAL SUCCESS to allow graph continuation
         log_error(f"Max iterations ({max_turns}) reached for {step_id}. Returning last output (incomplete).")
         last_output = iterations_data[-1]["output"] if iterations_data else {"error": "No output produced"}

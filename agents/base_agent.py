@@ -10,54 +10,32 @@ from datetime import datetime
 import os
 
 class AgentRunner:
-    """
-    Manages the execution of agents defined in the configuration.
-    Handles loading agent configs, building prompts, interacting with models,
-    and parsing responses.
-    """
-
     def __init__(self, multi_mcp):
-        """
-        Initializes the AgentRunner.
-
-        Args:
-            multi_mcp: The MultiMCP instance used for tool retrieval.
-        """
         self.multi_mcp = multi_mcp
-
+        
         # Load agent configurations
         config_path = Path(__file__).parent.parent / "config/agent_config.yaml"
         with open(config_path, "r") as f:
             self.agent_configs = yaml.safe_load(f)["agents"]
-
+    
     def calculate_cost(self, input_text: str, output_text: str) -> dict:
-        """
-        Calculates the estimated cost and token usage for a given interaction.
-        Note: The cost model is an approximation.
-
-        Args:
-            input_text (str): The input text sent to the model.
-            output_text (str): The output text received from the model.
-
-        Returns:
-            dict: A dictionary containing cost, input_tokens, output_tokens, and total_tokens.
-        """
+        """Calculate cost and token usage"""
         # Approximate tokens = words * 1.5
         input_words = len(input_text.split()) if input_text else 0
         output_words = len(output_text.split()) if output_text else 0
-
+        
         input_tokens = int(input_words * 1.5)
         output_tokens = int(output_words * 1.5)
-
+        
         # Cost per million tokens
         input_cost_per_million = 0.1  # $0.1 per 1M input tokens
         output_cost_per_million = 0.4  # $0.4 per 1M output tokens
-
+        
         input_cost = (input_tokens / 1_000_000) * input_cost_per_million
         output_cost = (output_tokens / 1_000_000) * output_cost_per_million
-
+        
         total_cost = input_cost + output_cost
-
+        
         return {
             "cost": total_cost,
             "input_tokens": input_tokens,
@@ -66,31 +44,20 @@ class AgentRunner:
         }
 
     async def run_agent(self, agent_type: str, input_data: dict, image_path: Optional[str] = None) -> dict:
-        """
-        Runs a specific agent with the provided input data.
-        Can optionally include an image for multimodal models.
-
-        Args:
-            agent_type (str): The type of agent to run (must be defined in agent_config.yaml).
-            input_data (dict): The input data for the agent's prompt.
-            image_path (str, optional): Path to an image file to include in the prompt. Defaults to None.
-
-        Returns:
-            dict: The result of the agent execution, including success status, output, and cost metrics.
-
-        Raises:
-            ValueError: If the agent_type is unknown.
-        """
-
+        """Run a specific agent with input data and optional image"""
+        
         if agent_type not in self.agent_configs:
             raise ValueError(f"Unknown agent type: {agent_type}")
-
+            
         config = self.agent_configs[agent_type]
-
+        
         try:
             # 1. Load prompt template
-            prompt_template = Path(config["prompt_file"]).read_text(encoding="utf-8")
-
+            prompt_path = Path(config["prompt_file"])
+            if not prompt_path.is_absolute():
+                prompt_path = Path(__file__).parent.parent / prompt_path
+            prompt_template = prompt_path.read_text(encoding="utf-8")
+            
             # 2. Get tools from specified MCP servers (if any)
             tools_text = ""
             if config.get("mcp_servers"):
@@ -112,10 +79,10 @@ class AgentRunner:
 
                         signature_str = ", ".join(arg_types)
                         tool_descriptions.append(f"- `{tool.name}({signature_str})` # {tool.description}")
-
+                    
                     tools_text = "\n\n### Available Tools\n\n" + "\n".join(tool_descriptions)
 
-
+            
             # 3. Build full prompt
             current_date = datetime.now().strftime("%Y-%m-%d")
             full_prompt = f"CURRENT_DATE: {current_date}\n\n{prompt_template.strip()}{tools_text}\n\n```json\n{json.dumps(input_data, indent=2)}\n```"
@@ -130,7 +97,7 @@ class AgentRunner:
 
             # 4. Create model manager with agent's specified model
             model_manager = ModelManager(config["model"])
-
+            
             # 5. Generate response (with or without image)
             if image_path and os.path.exists(image_path):
                 log_step(f"🖼️ {agent_type} (with image)")
@@ -138,7 +105,7 @@ class AgentRunner:
                 response = await model_manager.generate_content([full_prompt, image])
             else:
                 response = await model_manager.generate_text(full_prompt)
-
+            
             # 📝 LOGGING: Save raw response
             timestamp = datetime.now().strftime("%H%M%S")
             (debug_log_dir / f"{timestamp}_{agent_type}_response.txt").write_text(response, encoding="utf-8")
@@ -149,26 +116,26 @@ class AgentRunner:
             log_step(f"✅ {agent_type} finished", payload={"output_keys": list(output.keys()) if isinstance(output, dict) else "raw_string"}, symbol="🟩")
 
             # import pdb; pdb.set_trace()
-
+            
             # Calculate input text for costing
             input_text = str(input_data)
-
+            
             # Calculate output text for costing
             output_text = str(output)
-
+            
             # Calculate cost and tokens
             cost_data = self.calculate_cost(input_text, output_text)
-
+            
             # Add cost data to result
             if isinstance(output, dict):
                 output.update(cost_data)
-
+            
             return {
                 "success": True,
                 "agent_type": agent_type,
                 "output": output
             }
-
+            
         except Exception as e:
             log_error(f"❌ {agent_type}: {str(e)}")
             return {
@@ -182,10 +149,5 @@ class AgentRunner:
             }
 
     def get_available_agents(self) -> list:
-        """
-        Returns a list of all available agent types defined in the configuration.
-
-        Returns:
-            list: List of agent type strings.
-        """
+        """Return list of available agent types"""
         return list(self.agent_configs.keys())

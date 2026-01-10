@@ -24,7 +24,6 @@ except ImportError:
 load_dotenv()
 
 # Initialize FastMCP server
-# Removed timeout argument as it caused TypeError
 mcp = FastMCP("hybrid-browser")
 
 # --- Tool 1: Fast Text Search (DuckDuckGo + Extraction) ---
@@ -42,16 +41,7 @@ except ImportError:
 
 @mcp.tool()
 async def web_search(string: str, integer: int = 5) -> str:
-    """
-    Search the web using multiple engines (DuckDuckGo, Bing, Ecosia, etc.) and return a list of relevant result URLs.
-
-    Args:
-        string (str): The search query.
-        integer (int, optional): The maximum number of results to return. Defaults to 5.
-
-    Returns:
-        str: A string representation of the list of URLs found.
-    """
+    """Search the web using multiple engines (DuckDuckGo, Bing, Ecosia, etc.) and return a list of relevant result URLs"""
     try:
         urls = await smart_search(string, integer)
         return str(urls)
@@ -60,15 +50,7 @@ async def web_search(string: str, integer: int = 5) -> str:
 
 @mcp.tool()
 async def web_extract_text(string: str) -> str:
-    """
-    Extract readable text from a webpage using robust methods (Playwright/Trafilatura).
-
-    Args:
-        string (str): The URL of the webpage to extract text from.
-
-    Returns:
-        str: The extracted text content, truncated to 15,000 characters.
-    """
+    """Extract readable text from a webpage using robust methods (Playwright/Trafilatura)."""
     try:
         # Timeout 45s for robust extraction
         result = await asyncio.wait_for(smart_web_extract(string), timeout=45)
@@ -85,13 +67,6 @@ async def browser_use_action(string: str, headless: bool = True) -> str:
     Execute a complex browser task using Vision and generic reasoning.
     Use this for: Logging in, filling forms, navigating complex sites, or when text search fails.
     WARNING: Slow and expensive.
-
-    Args:
-        string (str): The natural language description of the task to perform.
-        headless (bool, optional): Whether to run the browser in headless mode. Defaults to True.
-
-    Returns:
-        str: The final result or summary of the browser action.
     """
     if not BROWSER_USE_AVAILABLE:
         return "Error: `browser-use` library is not installed."

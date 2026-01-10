@@ -3,9 +3,9 @@ import sys
 import os
 from pathlib import Path
 
-# Fix Path: Add '16_NetworkX' to sys.path so we can import 'tools' and 'core'
-# Current file: .../16_NetworkX/mcp_servers/server_sandbox.py
-# We want: .../16_NetworkX/
+# Fix Path: Add project root to sys.path so we can import 'tools' and 'core'
+# Current file: .../mcp_servers/server_sandbox.py
+# We want: project root
 root_dir = Path(__file__).parent.parent
 sys.path.append(str(root_dir))
 
@@ -36,12 +36,6 @@ async def run_python_script(code: str) -> str:
     Execute Python code in a secure sandbox.
     Use this for math, data processing, and logic.
     Returns the stdout and result of the execution.
-
-    Args:
-        code (str): The Python code to execute.
-
-    Returns:
-        str: A string summary of the execution result or error.
     """
     # We pass multi_mcp=None for now, limiting the sandbox to pure Python logic
     # without ability to call other MCP tools recursively.

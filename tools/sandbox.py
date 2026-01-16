@@ -151,7 +151,16 @@ def build_safe_globals(mcp_funcs: dict, multi_mcp=None, session_id: str = None) 
 
     if multi_mcp:
         async def parallel(*tool_calls):
-            coros = [multi_mcp.function_wrapper(tool_name, *args) for tool_name, *args in tool_calls]
+            # Prefer the sandbox tool proxies (they already unwrap results)
+            coros = []
+            for call in tool_calls:
+                tool_name = call[0]
+                args = call[1:]
+                fn = safe_globals.get(tool_name)
+                if callable(fn):
+                    coros.append(fn(*args))
+                else:
+                    coros.append(multi_mcp.function_wrapper(tool_name, *args))
             return await asyncio.gather(*coros)
         safe_globals["parallel"] = parallel
 
@@ -230,8 +239,139 @@ def make_tool_proxy(tool_name: str, mcp):
     Returns:
         function: An async function calling the MCP tool.
     """
+    def _content_items_to_text(val):
+        """
+        Best-effort conversion of MCP 'content' arrays (e.g., TextContent objects).
+
+        For web_search: If it's a list of TextContent objects where each .text is a URL,
+        extract them as a list[str] (don't join into single string).
+
+        For other tools: If it's a list of TextContent, join into a single text string.
+
+        If it's already a plain list[str], leave it alone.
+        """
+        if not isinstance(val, list):
+            return val
+
+        # If it's a list of MCP content objects with `.text`, extract the text values
+        if val and all(hasattr(x, "text") for x in val):
+            text_values = [str(x.text) for x in val]
+
+            # Special case: if this looks like a list of URLs (for web_search results),
+            # return them as a list, not joined text
+            if tool_name == "web_search" and all(
+                isinstance(t, str) and (t.startswith("http://") or t.startswith("https://"))
+                for t in text_values
+            ):
+                import sys
+                sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Detected URL list, preserving as list[str]\n")
+                sys.stderr.flush()
+                return text_values
+
+            # Otherwise, join into a single text (for text extraction, etc.)
+            return "\n".join(text_values)
+
+        return val
+
+    def _maybe_json_parse(val):
+        """
+        If val is a JSON string, parse it. Otherwise return as-is.
+        """
+        if not isinstance(val, str):
+            return val
+        s = val.strip()
+        if not s:
+            return val
+        if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
+            try:
+                return json.loads(s)
+            except Exception:
+                return val
+        return val
+
+    def _unwrap_tool_result(res):
+        """
+        Convert tool execution result into native Python.
+        Handles:
+          - ActionResultOutput-like wrappers: {success, content, error}
+          - MCP content lists (TextContent)
+          - JSON strings returned by tools
+          - Special case: web_search returning {"urls":[...]} JSON
+        """
+        import sys
+
+        # DEBUG: Log what we received
+        sys.stderr.write(f"\n{'='*80}\n")
+        sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Raw result type: {type(res)}\n")
+        sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Raw result repr: {repr(res)[:200]}\n")
+
+        # Check all attributes
+        if hasattr(res, '__dict__'):
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Has __dict__: {list(res.__dict__.keys())}\n")
+
+        # Unwrap ActionResultOutput-like objects
+        if hasattr(res, "success") and hasattr(res, "content"):
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Found ActionResultOutput-like object\n")
+            if not getattr(res, "success"):
+                err = getattr(res, "error", None) or f"Tool {tool_name} failed"
+                raise RuntimeError(err)
+            res = getattr(res, "content")
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Extracted content: {type(res)}, {repr(res)[:200]}\n")
+
+        # If MCP returned content items, convert to text when appropriate
+        original_res = res
+        res = _content_items_to_text(res)
+        if res != original_res:
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Converted content items to text\n")
+
+        # Parse JSON strings (backward compatibility for older web_search)
+        parsed = _maybe_json_parse(res)
+        if parsed != res:
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: JSON parsed: {type(parsed)}, {repr(parsed)[:200]}\n")
+
+        # Special-case web_search: if it returns a dict wrapper, extract urls
+        if tool_name == "web_search" and isinstance(parsed, dict):
+            sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: web_search dict detected, keys: {list(parsed.keys())}\n")
+            urls = parsed.get("urls")
+            if isinstance(urls, list):
+                sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Extracted {len(urls)} URLs from dict\n")
+                sys.stderr.write(f"{'='*80}\n\n")
+                sys.stderr.flush()
+                return urls
+
+        sys.stderr.write(f"🔧 UNWRAP [{tool_name}]: Returning final result: {type(parsed)}, {repr(parsed)[:200]}\n")
+        sys.stderr.write(f"{'='*80}\n\n")
+        sys.stderr.flush()
+        return parsed
+
     async def _tool_fn(*args):
-        return await mcp.function_wrapper(tool_name, *args)
+        import sys
+        sys.stderr.write(f"\n{'='*80}\n")
+        sys.stderr.write(f"📞 CALL [{tool_name}]: Calling with args: {args}\n")
+        sys.stderr.flush()
+
+        raw = await mcp.function_wrapper(tool_name, *args)
+
+        sys.stderr.write(f"📦 RAW [{tool_name}]: Received type: {type(raw)}\n")
+        sys.stderr.write(f"📦 RAW [{tool_name}]: Repr (first 300 chars): {repr(raw)[:300]}\n")
+
+        # Check if it's an object with attributes
+        if hasattr(raw, '__dict__'):
+            sys.stderr.write(f"📦 RAW [{tool_name}]: Has __dict__ with keys: {list(raw.__dict__.keys())}\n")
+            for key in list(raw.__dict__.keys())[:5]:  # Show first 5 attributes
+                val = getattr(raw, key)
+                sys.stderr.write(f"📦 RAW [{tool_name}]:   .{key} = {type(val).__name__}: {repr(val)[:100]}\n")
+
+        # Check if it's a list
+        if isinstance(raw, list):
+            sys.stderr.write(f"📦 RAW [{tool_name}]: Is list with {len(raw)} items\n")
+            for i, item in enumerate(raw[:3]):  # Show first 3 items
+                sys.stderr.write(f"📦 RAW [{tool_name}]:   [{i}] = {type(item).__name__}: {repr(item)[:100]}\n")
+
+        sys.stderr.write(f"{'='*80}\n")
+        sys.stderr.flush()
+
+        return _unwrap_tool_result(raw)
     return _tool_fn
 
 async def run_user_code(code: str, multi_mcp, session_id: str = "default_session") -> dict:

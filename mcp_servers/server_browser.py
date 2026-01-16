@@ -40,13 +40,49 @@ except ImportError:
 # --- Tool 1: Fast Robust Search (DuckDuckGo + Fallbacks) ---
 
 @mcp.tool()
-async def web_search(string: str, integer: int = 5) -> str:
-    """Search the web using multiple engines (DuckDuckGo, Bing, Ecosia, etc.) and return a list of relevant result URLs"""
+async def web_search(string: str, integer: int = 5) -> List[str]:
+    """
+    Search the web using multiple engines (DuckDuckGo, Bing, Ecosia, etc.)
+    and return a list of relevant result URLs.
+
+    IMPORTANT: Returns a Python list[str]. On any error (or empty query), returns [].
+    """
     try:
-        urls = await smart_search(string, integer)
-        return str(urls)
+        query = (string or "").strip()
+        if not query:
+            sys.stderr.write("⚠️ web_search called with empty query; returning [].\n")
+            sys.stderr.flush()
+            return []
+
+        try:
+            max_results = int(integer)
+        except (TypeError, ValueError):
+            max_results = 5
+
+        # Clamp to prevent abuse / runaway latency
+        max_results = max(1, min(max_results, 20))
+
+        # Hard timeout to avoid hanging MCP calls
+        urls = await asyncio.wait_for(smart_search(query, max_results), timeout=25)
+        if not isinstance(urls, list):
+            sys.stderr.write("⚠️ smart_search returned non-list; returning [].\n")
+            sys.stderr.flush()
+            return []
+
+        urls = [u for u in urls if isinstance(u, str) and u.strip()]
+        if not urls:
+            sys.stderr.write(f"⚠️ web_search: no results for query={query!r}\n")
+            sys.stderr.flush()
+        return urls
+    except asyncio.TimeoutError:
+        sys.stderr.write("⚠️ web_search timed out; returning [].\n")
+        sys.stderr.flush()
+        return []
     except Exception as e:
-        return f"[Error] Search failed: {str(e)}"
+        traceback.print_exc()
+        sys.stderr.write(f"⚠️ web_search failed: {str(e)}; returning [].\n")
+        sys.stderr.flush()
+        return []
 
 @mcp.tool()
 async def web_extract_text(string: str) -> str:

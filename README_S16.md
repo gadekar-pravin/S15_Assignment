@@ -1,7 +1,7 @@
 
 # 🚀 S16 NetworkX: The Modern Agent Architecture
 
-Welcome to the new **NetworkX-First** implementation. 
+Welcome to the new **NetworkX-First** implementation.
 This version replaces the manual graph management with a robust DAG structure and integrates modern tools.
 
 ## 🏗️ Architecture
@@ -56,3 +56,8 @@ uv run test_run.py
 1.  **UI**: Connect `ui/visualizer.py` to a React Flow frontend.
 2.  **E2B**: Fully replace `tools/sandbox.py` with E2B SDK.
 3.  **Mem0**: Enable active learning in `SummarizerAgent`.
+
+## 📚 Exercises
+Q1? What's the latest revenue of Dhurandhar Movie?
+Q2? Anmol Singh paid some amount to DLF to buy his apartment. What do you think the log value of this amount would be? Check documents.
+Q3: As of the end of the financial year, DLF has how many Total Employees? Check documents

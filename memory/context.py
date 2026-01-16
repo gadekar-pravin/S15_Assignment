@@ -1,8 +1,11 @@
 # contextManager.py – 100% NetworkX Graph-First (SIMPLIFIED)
 
+import ast
 import networkx as nx
 import json
 import time
+import re
+from typing import Any, Optional, Tuple, Dict
 from datetime import datetime
 from pathlib import Path
 import asyncio
@@ -135,6 +138,356 @@ class ExecutionContextManager:
             any(key in output for key in ["tool_calls", "schedule_tool", "browser_commands", "python_code"])
         )
 
+    def _ensure_parsed_value(self, value, *, _depth=0, max_depth=30, max_str_len=50_000):
+        """
+        Recursively coerce stringified literals into Python objects.
+        Safe-by-default: uses ast.literal_eval with guardrails.
+        """
+        if _depth > max_depth:
+            return value
+
+        # Strings: attempt parse only when it really looks like a literal
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return value
+            if len(s) > max_str_len:
+                return value
+
+            low = s.lower()
+            if low == "true":
+                return True
+            if low == "false":
+                return False
+            if low in ("none", "null"):
+                return None
+
+            starts_ends_like_container = (
+                (s[0] == "[" and s[-1] == "]") or
+                (s[0] == "{" and s[-1] == "}") or
+                (s[0] == "(" and s[-1] == ")")
+            )
+            starts_ends_like_quoted = (s[0] in ("'", '"') and s[-1] == s[0])
+            looks_like_number = s[0].isdigit() or s[0] in "+-."
+            looks_like_literal = (
+                starts_ends_like_container or
+                starts_ends_like_quoted or
+                looks_like_number
+            )
+
+            if not looks_like_literal:
+                return value
+
+            try:
+                parsed = ast.literal_eval(s)
+            except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                return value
+
+            return self._ensure_parsed_value(parsed, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len)
+
+        if isinstance(value, list):
+            return [self._ensure_parsed_value(v, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len) for v in value]
+
+        if isinstance(value, tuple):
+            return tuple(self._ensure_parsed_value(v, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len) for v in value)
+
+        if isinstance(value, dict):
+            return {k: self._ensure_parsed_value(v, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len) for k, v in value.items()}
+
+        if isinstance(value, set):
+            return {self._ensure_parsed_value(v, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len) for v in value}
+
+        if isinstance(value, frozenset):
+            return frozenset(self._ensure_parsed_value(v, _depth=_depth + 1, max_depth=max_depth, max_str_len=max_str_len) for v in value)
+
+        return value
+
+    # ---------------------------
+    # Robust extraction fallbacks
+    # ---------------------------
+    _META_KEYS = {
+        # common meta keys we should ignore when attempting singleton mapping
+        "cost", "input_tokens", "output_tokens",
+        "execution_result", "execution_status", "execution_error", "execution_time", "executed_variant",
+        "code_variants", "tool_calls", "schedule_tool", "browser_commands", "python_code",
+        "call_self", "agent", "status", "error",
+    }
+
+    def _short_repr(self, v: Any, max_len: int = 240) -> str:
+        try:
+            s = repr(v)
+        except Exception:
+            s = f"<unreprable {type(v).__name__}>"
+        if len(s) > max_len:
+            return s[: max_len - 3] + "..."
+        return s
+
+    def _normalize_key(self, k: Any) -> str:
+        if not isinstance(k, str):
+            k = str(k)
+        # normalize to compare keys even if agent changes casing/underscores/spaces
+        return re.sub(r"[^a-z0-9]+", "", k.strip().lower())
+
+    def _walk_find_key(self, obj: Any, target_norm: str, *, _depth: int = 0, max_depth: int = 6) -> Tuple[bool, Any]:
+        """
+        Recursively search dict/list-like structures for a key that matches target_norm
+        (normalized). Returns (found, value).
+        """
+        if _depth > max_depth:
+            return False, None
+
+        if isinstance(obj, dict):
+            # direct normalized match at this level
+            for k, v in obj.items():
+                if self._normalize_key(k) == target_norm:
+                    return True, v
+            # recurse
+            for v in obj.values():
+                found, val = self._walk_find_key(v, target_norm, _depth=_depth + 1, max_depth=max_depth)
+                if found:
+                    return True, val
+            return False, None
+
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                found, val = self._walk_find_key(item, target_norm, _depth=_depth + 1, max_depth=max_depth)
+                if found:
+                    return True, val
+            return False, None
+
+        return False, None
+
+    def _walk_find_key_suffix(self, obj: Any, suffix_norm: str, *, _depth: int = 0, max_depth: int = 6) -> Tuple[bool, Any, str]:
+        """
+        Recursively search for any key whose normalized form ends with the given suffix_norm.
+        Used as a forgiving fallback when the agent returns the right step-id suffix
+        (e.g., `_T004`) but drops or alters the prefix (common with FormatterAgent).
+        """
+        if _depth > max_depth:
+            return False, None, ""
+
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if self._normalize_key(k).endswith(suffix_norm):
+                    return True, v, k
+            for v in obj.values():
+                found, val, src = self._walk_find_key_suffix(v, suffix_norm, _depth=_depth + 1, max_depth=max_depth)
+                if found:
+                    return True, val, src
+            return False, None, ""
+
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                found, val, src = self._walk_find_key_suffix(item, suffix_norm, _depth=_depth + 1, max_depth=max_depth)
+                if found:
+                    return True, val, src
+            return False, None, ""
+
+        return False, None, ""
+
+    def _parse_jsonish_text(self, text: str, *, max_len: int = 80_000) -> Optional[Any]:
+        """
+        Try to parse JSON (or python-literal-ish) content embedded in text.
+        - fenced ```json ... ```
+        - first {...} block
+        - direct json.loads
+        - ast.literal_eval as a final attempt (guarded)
+        """
+        if not isinstance(text, str):
+            return None
+        s = text.strip()
+        if not s or len(s) > max_len:
+            return None
+
+        # 1) fenced code block (```json ... ``` or ``` ... ```)
+        fence = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", s, flags=re.IGNORECASE)
+        if fence:
+            candidate = fence.group(1).strip()
+            parsed = self._parse_jsonish_text(candidate, max_len=max_len)
+            if parsed is not None:
+                return parsed
+
+        # 2) direct json
+        if s[:1] in "{[":
+            try:
+                return json.loads(s)
+            except Exception:
+                pass
+
+        # 3) find a JSON-looking object inside text: from first '{' to last '}'
+        if "{" in s and "}" in s:
+            start = s.find("{")
+            end = s.rfind("}")
+            if 0 <= start < end:
+                blob = s[start:end + 1].strip()
+                try:
+                    return json.loads(blob)
+                except Exception:
+                    # sometimes it's python-dict formatted
+                    try:
+                        return self._ensure_parsed_value(blob)
+                    except Exception:
+                        pass
+
+        # 4) python literal as last resort (guarded by _ensure_parsed_value heuristics)
+        try:
+            parsed = self._ensure_parsed_value(s)
+            if parsed is not s:
+                return parsed
+        except Exception:
+            pass
+
+        return None
+
+    def _extract_from_mapping(
+        self,
+        mapping: Any,
+        write_key: str,
+        *,
+        allow_singleton: bool,
+        writes_count: int
+    ) -> Tuple[bool, Any, str]:
+        """
+        Try to extract write_key from mapping-like objects (dict or parsed structures).
+        Returns (found, value, source_label).
+        """
+        target_norm = self._normalize_key(write_key)
+
+        # If it's a string, try parsing it into something structured
+        if isinstance(mapping, str):
+            parsed = self._parse_jsonish_text(mapping)
+            if parsed is None:
+                return False, None, ""
+            return self._extract_from_mapping(parsed, write_key, allow_singleton=allow_singleton, writes_count=writes_count)
+
+        # Dict: exact key, normalized key, deep search, singleton
+        if isinstance(mapping, dict):
+            if write_key in mapping:
+                return True, mapping[write_key], "mapping:exact_key"
+
+            # normalized key match at top level
+            for k, v in mapping.items():
+                if self._normalize_key(k) == target_norm:
+                    return True, v, f"mapping:normalized_key({k})"
+
+            # deep search
+            found, val = self._walk_find_key(mapping, target_norm)
+            if found:
+                return True, val, "mapping:deep_search"
+
+            # singleton mapping only if it’s safe to do so
+            if allow_singleton and writes_count == 1:
+                # ignore meta-ish keys when considering singleton
+                payload_items = [(k, v) for k, v in mapping.items() if str(k) not in self._META_KEYS]
+                if len(payload_items) == 1:
+                    k, v = payload_items[0]
+                    return True, v, f"mapping:singleton({k})"
+
+            return False, None, ""
+
+        # List/tuple: deep search inside elements (useful if agent returns a list of dicts)
+        if isinstance(mapping, (list, tuple)):
+            found, val = self._walk_find_key(mapping, target_norm)
+            if found:
+                return True, val, "mapping:list_deep_search"
+            # If single write and the structure is "the answer itself"
+            if allow_singleton and writes_count == 1 and len(mapping) == 1:
+                return True, mapping[0], "mapping:list_singleton"
+            return False, None, ""
+
+        # Scalar: only accept as singleton value if single write key
+        if allow_singleton and writes_count == 1:
+            return True, mapping, "mapping:scalar_singleton"
+
+        return False, None, ""
+
+    def _get_final_answer_field(self, output: Dict[str, Any]) -> Optional[Any]:
+        """
+        Pull final answer-like fields from common variants.
+        """
+        if not isinstance(output, dict):
+            return None
+        for k in ("final_answer", "finalAnswer", "final", "answer"):
+            if k in output:
+                return output.get(k)
+        # sometimes nested under output
+        inner = output.get("output")
+        if isinstance(inner, dict):
+            for k in ("final_answer", "finalAnswer", "final", "answer"):
+                if k in inner:
+                    return inner.get(k)
+        return None
+
+    def _extract_write_value(self, write_key: str, *, writes: list, output: Any, execution_result: Any) -> Tuple[bool, Any, str]:
+        """
+        3-strategy extraction:
+          1) code execution produced variable
+          2) present in agent JSON output
+          3) present/hidden in final_answer (parse if needed)
+        Returns (found, value, source).
+        """
+        writes_count = len(writes) if isinstance(writes, list) else 1
+
+        # Strategy 1: execution_result (best)
+        if isinstance(execution_result, dict) and execution_result.get("status") == "success":
+            # Try multiple common shapes
+            candidate_fields = []
+            for k in ("result", "locals", "globals", "variables", "data", "output"):
+                if k in execution_result and execution_result[k] is not None:
+                    candidate_fields.append((k, execution_result[k]))
+
+            for field_name, candidate in candidate_fields:
+                found, val, src = self._extract_from_mapping(
+                    candidate, write_key,
+                    allow_singleton=True,
+                    writes_count=writes_count
+                )
+                if found:
+                    return True, val, f"exec:{field_name}/{src}"
+
+        # Strategy 2: agent JSON output (root + nested + deep + singleton)
+        if isinstance(output, dict):
+            # Root first
+            found, val, src = self._extract_from_mapping(
+                output, write_key,
+                allow_singleton=True,
+                writes_count=writes_count
+            )
+            if found:
+                return True, val, f"json:root/{src}"
+
+            # Common nested dict: output["output"]
+            inner = output.get("output")
+            if isinstance(inner, dict):
+                found, val, src = self._extract_from_mapping(
+                    inner, write_key,
+                    allow_singleton=True,
+                    writes_count=writes_count
+                )
+                if found:
+                    return True, val, f"json:nested_output/{src}"
+
+            # Fallback: match by step-id suffix (e.g., _T004) when prefix diverges
+            suffix_match = re.search(r"_t\d+$", write_key, flags=re.IGNORECASE)
+            if suffix_match:
+                suffix_norm = self._normalize_key(suffix_match.group(0))
+                found, val, src = self._walk_find_key_suffix(output, suffix_norm)
+                if found:
+                    return True, val, f"json:suffix_match({src})"
+
+        # Strategy 3: final_answer fallback (parse JSON hidden in text, or use raw text only if single write)
+        final_ans = self._get_final_answer_field(output) if isinstance(output, dict) else None
+        if final_ans is not None:
+            found, val, src = self._extract_from_mapping(
+                final_ans, write_key,
+                allow_singleton=True,   # but scalar/text only becomes value when single write
+                writes_count=writes_count
+            )
+            if found:
+                return True, val, f"final_answer/{src}"
+
+        return False, None, ""
+
     def _extract_executable_code(self, output):
         """
         Extracts executable code snippets from the agent's output.
@@ -185,18 +538,21 @@ class ExecutionContextManager:
 
                 # 1. Inject ALL globals_schema variables
                 for var_name, var_value in globals_schema.items():
-                    globals_injection += f'{var_name} = {repr(var_value)}\n'
+                    # Parse stringified literals early (e.g. "['url1']" -> ['url1'])
+                    parsed_value = self._ensure_parsed_value(var_value)
+                    globals_injection += f'{var_name} = {repr(parsed_value)}\n'
 
                 # 2. Inject agent's own output variables
                 for var_name, var_value in output.items():
                     if var_name not in ['code_variants', 'call_self', 'cost', 'input_tokens', 'output_tokens', 'execution_result', 'execution_status', 'execution_error', 'execution_time', 'executed_variant']:
-                        globals_injection += f'{var_name} = {repr(var_value)}\n'
+                        parsed_value = self._ensure_parsed_value(var_value)
+                        globals_injection += f'{var_name} = {repr(parsed_value)}\n'
 
                 # 3. Create convenience variables for reads
                 reads_data = {}
                 for read_key in reads:
                     if read_key in globals_schema:
-                        reads_data[read_key] = globals_schema[read_key]
+                        reads_data[read_key] = self._ensure_parsed_value(globals_schema[read_key])
 
                 globals_injection += f'reads_data = {repr(reads_data)}\n'
 
@@ -355,14 +711,41 @@ class ExecutionContextManager:
         # USER INTERACTION CHECK
         if self._is_clarification_request(agent_type, output):
             try:
-                user_response = self._handle_user_interaction_rich(output)
+                raw_answer = self._handle_user_interaction_rich(output)
                 writes_to = output.get("writes_to", "user_response")
-                self.plan_graph.graph['globals_schema'][writes_to] = user_response
+
+                # Build rich context: Question + Answer
+                question = (output.get("clarificationMessage") or "").strip()
+                answer = raw_answer.strip() if isinstance(raw_answer, str) else str(raw_answer)
+                if not question:
+                    question = f"Clarification requested by {agent_type or 'agent'}"
+
+                rich_context = f"Agent asked: {question} User said: {answer}"
+
+                globals_schema = self.plan_graph.graph['globals_schema']
+
+                # Save rich context into the primary memory slot (fix for "Amnesic User")
+                globals_schema[writes_to] = rich_context
+
+                # Also keep structured pieces for downstream code/prompting if needed
+                globals_schema[f"{writes_to}_raw"] = answer
+                globals_schema[f"{writes_to}_question"] = question
 
                 output = output.copy()
-                output["user_response"] = user_response
+
+                # Ensure extraction logic later in mark_done picks up rich context
+                output[writes_to] = rich_context
+                output[f"{writes_to}_raw"] = answer
+                output[f"{writes_to}_question"] = question
+
+                # Convenience / legacy keys
+                output["user_response"] = rich_context
+                output["user_response_raw"] = answer
+                output["clarification_question"] = question
+                output["rich_context"] = rich_context
                 output["interaction_completed"] = True
-                print(f"✅ User input captured: {writes_to} = '{user_response}'")
+
+                print(f"✅ User input captured: {writes_to} = '{rich_context}'")
 
             except Exception as e:
                 print(f"❌ User interaction failed: {e}")
@@ -381,46 +764,22 @@ class ExecutionContextManager:
 
         if writes:
             for write_key in writes:
-                extracted = False
+                found, value, source = self._extract_write_value(
+                    write_key,
+                    writes=writes,
+                    output=output,
+                    execution_result=execution_result
+                )
 
-                # Strategy 1: Extract from code execution results (RetrieverAgent, CoderAgent)
-                if execution_result and execution_result.get("status") == "success":
-                    result_data = execution_result.get("result", {})
-
-                    if write_key in result_data:
-                        globals_schema[write_key] = result_data[write_key]
-                        print(f"✅ Extracted {write_key} = {result_data[write_key]}")
-                        extracted = True
-                    elif len(result_data) == 1 and len(writes) == 1:
-                        key, value = next(iter(result_data.items()))
-                        globals_schema[write_key] = value
-                        print(f"✅ Extracted {write_key} = {value} (from {key})")
-                        extracted = True
-
-                # Strategy 2: Extract from direct agent output (ThinkerAgent, DistillerAgent, FormatterAgent)
-                if not extracted and output and isinstance(output, dict):
-                    # Check root
-                    if write_key in output:
-                        globals_schema[write_key] = output[write_key]
-                        print(f"✅ Extracted {write_key} = {output[write_key]} (direct)")
-                        extracted = True
-                    # Check nested 'output' dictionary (common pattern)
-                    elif "output" in output and isinstance(output["output"], dict) and write_key in output["output"]:
-                        val = output["output"][write_key]
-                        globals_schema[write_key] = val
-                        print(f"✅ Extracted {write_key} = {val} (nested)")
-                        extracted = True
-
-                    # 🎉 NEW: Check for 'final_answer' as fallback (Summarizer often uses this)
-                    elif "final_answer" in output:
-                        globals_schema[write_key] = output["final_answer"]
-                        print(f"✅ Extracted {write_key} = [Final Answer] (mapped from 'final_answer')")
-                        extracted = True
-
-                # Strategy 3: Emergency fallback - try to find any matching data
-                if not extracted:
+                if found:
+                    # Normalize/parse before storing so all downstream consumers
+                    # (including sandbox injection) see correct Python types.
+                    parsed_value = self._ensure_parsed_value(value)
+                    globals_schema[write_key] = parsed_value
+                    print(f"✅ Extracted {write_key} = {self._short_repr(parsed_value)} ({source})")
+                else:
                     print(f"⚠️  Could not extract {write_key}")
-                    # Set empty placeholder to prevent downstream errors
+                    # Keep existing behavior: safe placeholder prevents downstream breakage
                     globals_schema[write_key] = []
 
         # Store results
@@ -488,7 +847,7 @@ class ExecutionContextManager:
 
         for read_key in reads:
             if read_key in globals_schema:
-                inputs[read_key] = globals_schema[read_key]
+                inputs[read_key] = self._ensure_parsed_value(globals_schema[read_key])
             else:
                 print(f"⚠️  Missing dependency: '{read_key}' not found in globals_schema")
                 print(f"📋 Available keys: {list(globals_schema.keys())}")

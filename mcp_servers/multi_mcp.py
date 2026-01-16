@@ -23,7 +23,7 @@ class MultiMCP:
             },
             "rag": {
                 "command": "uv",
-                "args": ["run", str(server_root / "server_rag.py")],
+                "args": ["run", str(server_root / "server_rag_gemini.py")],
             },
             "sandbox": {
                 "command": "uv",

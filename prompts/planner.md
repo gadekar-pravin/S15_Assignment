@@ -56,6 +56,18 @@ If the user query includes file(s), you must:
 * Always reference filenames or file_manifest keys in `reads` or `agent_prompt`
 * Break large file tasks into modular subtasks by topic, section, or time window if file size warrants
 
+**If the user query mentions "documents", "stored", "local", "according to documents", or similar phrases:**
+
+* **CRITICAL**: The system has a RAG (Retrieval Augmented Generation) system with stored documents
+* You MUST create tasks that explicitly use phrases like:
+  - "Search stored documents for..."
+  - "Check local documents about..."
+  - "Retrieve from stored files information on..."
+* **DO NOT** create vague tasks like "Research..." or "Find information..." which will default to web search
+* Example: Query "Who is the best cricketer according to the documents?"
+  - ✅ GOOD: T001: "Search stored documents for information about cricketers and their rankings"
+  - ❌ BAD: T001: "Research opinions on best cricketers" (will search web instead of documents)
+
 ---
 
 ### "mid_session" Mode
@@ -172,7 +184,10 @@ For timeline, schedule, or flow-based projects:
 
 Simulate layered planning like a real team:
 
-* **RetrieverAgent**: Gathers raw external or document-based info
+* **RetrieverAgent**: Gathers information from stored documents (PDFs, DOCX, TXT) OR external web sources.
+  - **CRITICAL**: If query mentions "documents", "stored", "local files", "uploaded", "according to documents", or refers to information that might be in stored files → task MUST explicitly mention "Search stored documents" or "Check local documents"
+  - Example GOOD task: "Search stored documents for cricket information"
+  - Example BAD task: "Research cricket information" (too vague, will default to web)
 * **ThinkerAgent**: Clusters, compares, or resolves logic
 * **DistillerAgent**: Synthesizes summaries or bullets
 * **CoderAgent**: Thinks, writes, and automatically executes required code in a single atomic step.  

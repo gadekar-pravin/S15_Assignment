@@ -1,3 +1,11 @@
+"""
+RAG Server using Google Gemini AI instead of Ollama
+This version uses:
+- text-embedding-004 for embeddings
+- gemini-1.5-flash for text generation (semantic analysis)
+- gemini-1.5-flash for image captioning (multimodal)
+"""
+
 from mcp.server.fastmcp import FastMCP, Image
 from mcp.server.fastmcp.prompts import base
 from mcp.types import TextContent
@@ -10,42 +18,48 @@ import json
 import faiss
 import numpy as np
 from pathlib import Path
-import requests
 from markitdown import MarkItDown
 import time
-from models import AddInput, AddOutput, SqrtInput, SqrtOutput, StringsToIntsInput, StringsToIntsOutput, ExpSumInput, ExpSumOutput, PythonCodeInput, PythonCodeOutput, UrlInput, FilePathInput, MarkdownInput, MarkdownOutput, ChunkListOutput, SearchDocumentsInput
+from models import SearchDocumentsInput, MarkdownOutput, FilePathInput, UrlInput
 from tqdm import tqdm
 import hashlib
 from pydantic import BaseModel
-import subprocess
 import sqlite3
 import trafilatura
 import pymupdf4llm
 import re
-import base64 # ollama needs base64-encoded-image
+import base64
 import asyncio
+import google.generativeai as genai
+from dotenv import load_dotenv
 
+# Load environment variables
+load_dotenv()
 
+mcp = FastMCP("Local Storage RAG (Gemini)")
 
-mcp = FastMCP("Local Storage RAG")
+# Configure Google Gemini
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in environment variables")
 
-EMBED_URL = "http://localhost:11434/api/embeddings"
-OLLAMA_CHAT_URL = "http://localhost:11434/api/chat"
-OLLAMA_URL = "http://localhost:11434/api/generate"
-EMBED_MODEL = "nomic-embed-text"
-GEMMA_MODEL = "gemma3:12b"
-PHI_MODEL = "phi4:latest"
-QWEN_MODEL = "qwen2.5:32b-instruct-q4_0 "
+genai.configure(api_key=GEMINI_API_KEY)
+
+# Gemini Models
+EMBED_MODEL = "models/text-embedding-004"
+TEXT_MODEL = "gemini-2.5-flash"  # For semantic analysis
+VISION_MODEL = "gemini-2.5-flash"  # For image captioning (supports multimodal)
+
 CHUNK_SIZE = 256
 CHUNK_OVERLAP = 40
-MAX_CHUNK_LENGTH = 512  # characters
-TOP_K = 3  # FAISS top-K matches
+MAX_CHUNK_LENGTH = 512
+TOP_K = 3
 ROOT = Path(__file__).parent.resolve()
 
 
 def get_embedding(text: str) -> np.ndarray:
     """
-    Computes the embedding for a given text using the local Ollama API.
+    Computes the embedding for a given text using Google's Gemini API.
 
     Args:
         text (str): The input text.
@@ -53,9 +67,17 @@ def get_embedding(text: str) -> np.ndarray:
     Returns:
         np.ndarray: The embedding vector as a float32 numpy array.
     """
-    result = requests.post(EMBED_URL, json={"model": EMBED_MODEL, "prompt": text})
-    result.raise_for_status()
-    return np.array(result.json()["embedding"], dtype=np.float32)
+    try:
+        result = genai.embed_content(
+            model=EMBED_MODEL,
+            content=text,
+            task_type="retrieval_document"
+        )
+        return np.array(result['embedding'], dtype=np.float32)
+    except Exception as e:
+        mcp_log("ERROR", f"Embedding generation failed: {e}")
+        raise
+
 
 def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     """
@@ -73,6 +95,7 @@ def chunk_text(text, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     for i in range(0, len(words), size - overlap):
         yield " ".join(words[i:i+size])
 
+
 def mcp_log(level: str, message: str) -> None:
     """
     Logs messages to stderr for MCP protocol compatibility.
@@ -85,15 +108,10 @@ def mcp_log(level: str, message: str) -> None:
         sys.stderr.write(f"{level}: {message}\n")
         sys.stderr.flush()
 
-# === CHUNKING ===
-
-
-
-
 
 def are_related(chunk1: str, chunk2: str, index: int) -> bool:
     """
-    Uses an LLM to determine if two text chunks are semantically related and should be grouped together.
+    Uses Gemini to determine if two text chunks are semantically related.
 
     Args:
         chunk1 (str): The first text chunk.
@@ -125,16 +143,29 @@ Just respond in one word (Yes or No), and do not provide any further explanation
     print(f"  Chunk {index} → {chunk1[:60]}{'...' if len(chunk1) > 60 else ''}")
     print(f"  Chunk {index+1} → {chunk2[:60]}{'...' if len(chunk2) > 60 else ''}")
 
-    result = requests.post(OLLAMA_CHAT_URL, json={
-        "model": PHI_MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "stream": False
-    })
-    result.raise_for_status()
-    reply = result.json().get("message", {}).get("content", "").strip().lower()
-    print(f"Model reply: {reply}")
-    return reply.startswith("yes")
+    try:
+        model = genai.GenerativeModel(TEXT_MODEL)
+        response = model.generate_content(
+            prompt,
+            safety_settings={
+                'HARASSMENT': 'BLOCK_NONE',
+                'HATE_SPEECH': 'BLOCK_NONE',
+                'SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                'DANGEROUS_CONTENT': 'BLOCK_NONE'
+            }
+        )
 
+        # Handle blocked responses - default to not related
+        if not response.parts:
+            print(f"Model response blocked by safety, treating as not related")
+            return False
+
+        reply = response.text.strip().lower()
+        print(f"Model reply: {reply}")
+        return reply.startswith("yes")
+    except Exception as e:
+        mcp_log("ERROR", f"Gemini API error in are_related: {e}")
+        return False
 
 
 @mcp.tool()
@@ -148,14 +179,15 @@ def search_stored_documents_rag(input: SearchDocumentsInput) -> list[str]:
     Returns:
         list[str]: A list of relevant document extracts with source metadata.
     """
-
     ensure_faiss_ready()
     query = input.query
     mcp_log("SEARCH", f"Query: {query}")
     try:
         index = faiss.read_index(str(ROOT / "faiss_index" / "index.bin"))
         metadata = json.loads((ROOT / "faiss_index" / "metadata.json").read_text())
-        query_vec = get_embedding(query ).reshape(1, -1)
+
+        # Use Gemini for query embedding
+        query_vec = get_embedding(query).reshape(1, -1)
         D, I = index.search(query_vec, k=5)
         results = []
         for idx in I[0]:
@@ -168,7 +200,7 @@ def search_stored_documents_rag(input: SearchDocumentsInput) -> list[str]:
 
 def caption_image(img_url_or_path: str) -> str:
     """
-    Generates a caption for an image (local path or URL) using a VLM.
+    Generates a caption for an image using Gemini's vision capabilities.
 
     Args:
         img_url_or_path (str): The file path or URL of the image.
@@ -178,66 +210,50 @@ def caption_image(img_url_or_path: str) -> str:
     """
     mcp_log("CAPTION", f"Attempting to caption image: {img_url_or_path}")
 
-    # Check if input is a URL
-    if img_url_or_path.startswith("http://") or img_url_or_path.startswith("https://"):
-        try:
-            result = requests.get(img_url_or_path)
-            if result.status_code != 200:
-                raise Exception(f"HTTP {result.status_code}")
-            encoded_image = base64.b64encode(result.content).decode("utf-8")
-        except Exception as e:
-            mcp_log("ERROR", f"Failed to download image from URL: {e}")
-            return f"[Image could not be downloaded: {img_url_or_path}]"
-    else:
-        full_path = Path(__file__).parent / "documents" / img_url_or_path
-        full_path = full_path.resolve()
-
-        if not full_path.exists():
-            mcp_log("ERROR", f"Image file not found: {full_path}")
-            return f"[Image file not found: {img_url_or_path}]"
-
-        with open(full_path, "rb") as img_file:
-            encoded_image = base64.b64encode(img_file.read()).decode("utf-8")
-
-
     try:
-        if img_url_or_path.startswith("http"): # for extract_web_pages
-            result = requests.get(img_url_or_path)
-            encoded_image = base64.b64encode(result.content).decode("utf-8")
+        # Load the image
+        if img_url_or_path.startswith("http://") or img_url_or_path.startswith("https://"):
+            import requests
+            response = requests.get(img_url_or_path)
+            if response.status_code != 200:
+                raise Exception(f"HTTP {response.status_code}")
+            from io import BytesIO
+            img = PILImage.open(BytesIO(response.content))
         else:
-            with open(full_path, "rb") as img_file:
-                encoded_image = base64.b64encode(img_file.read()).decode("utf-8")
+            full_path = Path(__file__).parent / "documents" / img_url_or_path
+            full_path = full_path.resolve()
+            if not full_path.exists():
+                mcp_log("ERROR", f"Image file not found: {full_path}")
+                return f"[Image file not found: {img_url_or_path}]"
+            img = PILImage.open(full_path)
 
-        # Set stream=True to get the full generator-style output
-        with requests.post(OLLAMA_URL, json={
-                "model": GEMMA_MODEL,
-                "prompt": "Look only at the attached image. If it's code, output it exactly as text. If it's a visual scene, describe it as you would for an image alt-text. Never generate new code. Return only the contents of the image.",
-                "images": [encoded_image],
-                "stream": True
-            }, stream=True) as result:
+        # Use Gemini Vision to caption the image
+        model = genai.GenerativeModel(VISION_MODEL)
+        prompt = "Look only at the attached image. If it's code, output it exactly as text. If it's a visual scene, describe it as you would for an image alt-text. Never generate new code. Return only the contents of the image."
 
-            caption_parts = []
-            for line in result.iter_lines():
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                    caption_parts.append(data.get("response", ""))  # ✅ fixed key
-                    if data.get("done", False):
-                        break
-                except json.JSONDecodeError:
-                    continue  # skip malformed lines
+        response = model.generate_content(
+            [prompt, img],
+            safety_settings={
+                'HARASSMENT': 'BLOCK_NONE',
+                'HATE_SPEECH': 'BLOCK_NONE',
+                'SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                'DANGEROUS_CONTENT': 'BLOCK_NONE'
+            }
+        )
 
-            caption = "".join(caption_parts).strip()
-            mcp_log("CAPTION", f"Caption generated: {caption}")
-            return caption if caption else "[No caption returned]"
+        # Handle blocked responses
+        if not response.parts:
+            mcp_log("WARN", f"Gemini blocked image caption response, using placeholder")
+            return "[Image content blocked by safety filters]"
+
+        caption = response.text.strip()
+
+        mcp_log("CAPTION", f"Caption generated: {caption}")
+        return caption if caption else "[No caption returned]"
 
     except Exception as e:
         mcp_log("ERROR", f"Failed to caption image {img_url_or_path}: {e}")
         return f"[Image could not be processed: {img_url_or_path}]"
-
-
-
 
 
 def replace_images_with_captions(markdown: str) -> str:
@@ -268,13 +284,7 @@ def replace_images_with_captions(markdown: str) -> str:
     return re.sub(r'!\[(.*?)\]\((.*?)\)', replace, markdown)
 
 
-# @mcp.tool()
-# def convert_webpage_url_into_markdown(input: UrlInput) -> MarkdownOutput:
-#     """Return clean webpage content without Ads, and clutter. """
-
-#     downloaded = trafilatura.fetch_url(input.url)
-#     if not downloaded:
-#         return MarkdownOut@mcp.tool()
+@mcp.tool()
 def convert_pdf_to_markdown(string: str) -> MarkdownOutput:
     """
     Converts a PDF file to Markdown format, handling images by extracting and captioning them.
@@ -285,8 +295,6 @@ def convert_pdf_to_markdown(string: str) -> MarkdownOutput:
     Returns:
         MarkdownOutput: The resulting markdown content.
     """
-
-
     if not os.path.exists(string):
         return MarkdownOutput(markdown=f"File not found: {string}")
 
@@ -300,7 +308,6 @@ def convert_pdf_to_markdown(string: str) -> MarkdownOutput:
         write_images=True,
         image_path=str(global_image_dir)
     )
-
 
     # Re-point image links in the markdown
     markdown = re.sub(
@@ -330,7 +337,7 @@ def caption_images(img_url_or_path: str) -> str:
 
 def semantic_merge(text: str) -> list[str]:
     """
-    Splits text semantically using an LLM. It detects if a chunk contains multiple distinct topics
+    Splits text semantically using Gemini. It detects if a chunk contains multiple distinct topics
     and splits them intelligently, carrying over the second topic to the next chunk.
 
     Args:
@@ -366,12 +373,25 @@ Keep markdown formatting intact.
 """
 
         try:
-            result = requests.post(OLLAMA_CHAT_URL, json={
-                "model": PHI_MODEL,
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": False
-            })
-            reply = result.json().get("message", {}).get("content", "").strip()
+            model = genai.GenerativeModel(TEXT_MODEL)
+            response = model.generate_content(
+                prompt,
+                safety_settings={
+                    'HARASSMENT': 'BLOCK_NONE',
+                    'HATE_SPEECH': 'BLOCK_NONE',
+                    'SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                    'DANGEROUS_CONTENT': 'BLOCK_NONE'
+                }
+            )
+
+            # Handle blocked responses gracefully
+            if not response.parts:
+                mcp_log("WARN", f"Gemini blocked response for semantic chunking, treating as single chunk")
+                final_chunks.append(chunk_text)
+                i += WORD_LIMIT
+                continue
+
+            reply = response.text.strip()
 
             if reply:
                 # If LLM returned second part, separate it
@@ -394,7 +414,7 @@ Keep markdown formatting intact.
                 final_chunks.append(chunk_text)
 
         except Exception as e:
-            mcp_log("ERROR", f"Semantic chunking LLM error: {e}")
+            mcp_log("ERROR", f"Semantic chunking Gemini error: {e}")
             final_chunks.append(chunk_text)
 
         i += WORD_LIMIT
@@ -402,21 +422,16 @@ Keep markdown formatting intact.
     return final_chunks
 
 
-
-
-
-
-
 def process_documents():
     """
     Processes all documents in the 'documents' directory.
-    Converts them to markdown, chunks them, computes embeddings, and builds/updates the FAISS index.
+    Converts them to markdown, chunks them, computes embeddings using Gemini, and builds/updates the FAISS index.
     Supports PDF, HTML, and other formats supported by MarkItDown.
     """
-    mcp_log("INFO", "Indexing documents with unified RAG pipeline...")
+    mcp_log("INFO", "Indexing documents with Gemini-based RAG pipeline...")
     ROOT = Path(__file__).parent.resolve()
     DOC_PATH = ROOT / "documents"
-    INDEX_CACHE = ROOT / "faiss_index"
+    INDEX_CACHE = ROOT / "faiss_index_gemini"
     INDEX_CACHE.mkdir(exist_ok=True)
     INDEX_FILE = INDEX_CACHE / "index.bin"
     METADATA_FILE = INDEX_CACHE / "metadata.json"
@@ -430,6 +445,9 @@ def process_documents():
     index = faiss.read_index(str(INDEX_FILE)) if INDEX_FILE.exists() else None
 
     for file in DOC_PATH.glob("*.*"):
+        if file.name.startswith('.'):  # Skip hidden files
+            continue
+
         fhash = file_hash(file)
         if file.name in CACHE_META and CACHE_META[file.name] == fhash:
             mcp_log("SKIP", f"Skipping unchanged file: {file.name}")
@@ -442,11 +460,12 @@ def process_documents():
 
             if ext == ".pdf":
                 mcp_log("INFO", f"Using MuPDF4LLM to extract {file.name}")
-                markdown = convert_pdf_to_markdown(FilePathInput(file_path=str(file))).markdown
+                markdown = convert_pdf_to_markdown(str(file)).markdown
 
-            elif ext in [".html", ".htm", ".url"]:
+            elif ext in [".html", ".htm"]:
                 mcp_log("INFO", f"Using Trafilatura to extract {file.name}")
-                markdown = extract_webpage(UrlInput(url=file.read_text().strip())).markdown
+                content = trafilatura.extract(file.read_text())
+                markdown = content if content else ""
 
             else:
                 # Fallback to MarkItDown for other formats
@@ -465,10 +484,9 @@ def process_documents():
                 mcp_log("INFO", f"Running semantic merge on {file.name} with {len(markdown.split())} words")
                 chunks = semantic_merge(markdown)
 
-
             embeddings_for_file = []
             new_metadata = []
-            for i, chunk in enumerate(tqdm(chunks, desc=f"Embedding {file.name}")):
+            for i, chunk in enumerate(tqdm(chunks, desc=f"Embedding {file.name} (Gemini)")):
                 embedding = get_embedding(chunk)
                 embeddings_for_file.append(embedding)
                 new_metadata.append({
@@ -485,7 +503,7 @@ def process_documents():
                 metadata.extend(new_metadata)
                 CACHE_META[file.name] = fhash
 
-                # ✅ Immediately save index and metadata
+                # Save index and metadata
                 CACHE_FILE.write_text(json.dumps(CACHE_META, indent=2))
                 METADATA_FILE.write_text(json.dumps(metadata, indent=2))
                 faiss.write_index(index, str(INDEX_FILE))
@@ -493,8 +511,9 @@ def process_documents():
 
         except Exception as e:
             mcp_log("ERROR", f"Failed to process {file.name}: {e}")
+            import traceback
+            traceback.print_exc()
     mcp_log("INFO", "READY")
-
 
 
 def ensure_faiss_ready():
@@ -513,7 +532,7 @@ def ensure_faiss_ready():
 
 
 async def main():
-    mcp_log("INFO", "STARTING THE SERVER AT AMAZING LOCATION")
+    mcp_log("INFO", "STARTING THE GEMINI-BASED RAG SERVER")
 
     if len(sys.argv) > 1 and sys.argv[1] == "dev":
         mcp.run()  # Run without transport for dev server
@@ -526,9 +545,6 @@ async def main():
 
         # Wait a moment for the server to start
         await asyncio.sleep(2)
-
-        # Process documents after server is running
-        # process_documents()
 
         # Keep the main thread alive
         try:

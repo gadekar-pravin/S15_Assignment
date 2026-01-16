@@ -21,10 +21,11 @@ dependencies = [
     "faiss-cpu>=1.7.4",
     "numpy>=1.24.0",
     "pymupdf4llm>=0.0.5",
-    "markitdown>=0.0.1a2",
+    "markitdown[docx]>=0.0.1a2",
     "tqdm>=4.66.0",
     "requests>=2.31.0",
     "pyyaml>=6.0.0",
+    "google-generativeai>=0.8.6",
 ]
 
 [project.optional-dependencies]

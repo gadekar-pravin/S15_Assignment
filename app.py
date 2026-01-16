@@ -7,6 +7,42 @@ from rich import print
 from rich.console import Console
 from rich.panel import Panel
 
+import json
+import tempfile
+import webbrowser
+from pathlib import Path
+
+def looks_like_html(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    s2 = s.lstrip()
+    return s2.startswith("<") and ("</" in s2 or "<table" in s2 or "<div" in s2)
+
+def save_html_report(html: str, out_path: str | None = None, open_in_browser: bool = True) -> Path:
+    if out_path:
+        path = Path(out_path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        path = Path(tempfile.gettempdir()) / "s16_report.html"
+
+    path.write_text(html, encoding="utf-8")
+
+    if open_in_browser:
+        webbrowser.open(path.as_uri())
+
+    return path
+
+def extract_best_output(final_outputs):
+    # If it's a dict, prefer the first HTML-looking string value
+    if isinstance(final_outputs, dict):
+        for v in final_outputs.values():
+            if isinstance(v, str) and looks_like_html(v):
+                return v
+        return json.dumps(final_outputs, ensure_ascii=False, indent=2)
+
+    return str(final_outputs)
+
+
 # Add project root to python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -28,7 +64,8 @@ async def run_query(agent_loop, query):
     if context:
         summary = context.get_execution_summary()
         if "final_outputs" in summary and summary["final_outputs"]:
-            return str(summary["final_outputs"])
+            # return str(summary["final_outputs"])
+            return extract_best_output(summary["final_outputs"])
         else:
             summarizer_node = next((n for n in context.plan_graph.nodes if context.plan_graph.nodes[n].get("agent") == "SummarizerAgent"), None)
             if summarizer_node:
@@ -38,6 +75,10 @@ async def run_query(agent_loop, query):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--ui", action="store_true", help="Launch Web UI")
+
+    parser.add_argument("--open-report", action="store_true", help="If output is HTML, save it and open in browser")
+    parser.add_argument("--report-path", type=str, default=None, help="Where to save HTML report (optional)")
+
     args = parser.parse_args()
 
     console = Console()
@@ -54,38 +95,38 @@ async def main():
         if args.ui:
             import gradio as gr
             import core.loop
-            
+
             # Global buffer for logs
             log_buffer = []
-            
+
             # Monkeypatch logging
             original_log_step = core.loop.log_step
             def ui_log_step(title, payload=None, symbol="🟢", **kwargs):
                 log_buffer.append(f"{symbol} {title}")
                 # Pass everything to original logger
                 original_log_step(title, payload, symbol, **kwargs)
-            
+
             core.loop.log_step = ui_log_step
-            
+
             async def chat_fn(message, history):
                 log_buffer.clear()
                 log_buffer.append("🚀 Starting analysis...")
-                
+
                 # Run as task effectively
                 task = asyncio.create_task(run_query(agent_loop, message))
-                
+
                 # Stream logs
                 while not task.done():
                     logs = "\n> ".join(log_buffer[-10:]) # Show last 10 logs
                     yield f"**Thinking...**\n\n> {logs}"
                     await asyncio.sleep(0.2)
-                
+
                 # Verify result
                 try:
                     result = await task
                 except Exception as e:
                     result = f"Error: {e}"
-                
+
                 full_logs = "\n".join([f"> {l}" for l in log_buffer])
                 yield f"<details><summary>Execution Logs</summary>\n\n{full_logs}\n</details>\n\n{result}"
 
@@ -96,11 +137,11 @@ async def main():
             )
             print("[bold green]Starting UI on http://localhost:7860[/bold green]")
             # Launch without blocking async loop, so MultiMCP pipes continue to work
-            demo.launch(prevent_thread_lock=True) 
-            
+            demo.launch(prevent_thread_lock=True)
+
             # Keep the main thread alive and let asyncio loop process background tasks
             while True:
-                await asyncio.sleep(1) 
+                await asyncio.sleep(1)
         else:
             # 3. Interactive Loop (CLI)
             while True:
@@ -108,7 +149,7 @@ async def main():
                     query = console.input("\n[bold green]User Input (or 'exit'):[/bold green] ")
                     if query.lower() in ["exit", "quit", "q"]:
                         break
-                    
+
                     if not query.strip():
                         continue
 
@@ -116,7 +157,18 @@ async def main():
 
                     # Run Workflow
                     result_text = await run_query(agent_loop, query)
-                    console.print(Panel(result_text, title="Result", border_style="green"))
+                    # console.print(Panel(result_text, title="Result", border_style="green"))
+
+                    if looks_like_html(result_text):
+                        path = save_html_report(
+                            result_text,
+                            out_path=args.report_path,
+                            open_in_browser=args.open_report
+                        )
+                        console.print(f"[bold green]HTML report saved:[/bold green] {path}")
+                    # else:
+                        console.print(Panel(result_text, title="Result", border_style="green"))
+
 
                 except KeyboardInterrupt:
                     print("\n[yellow]Interrupted by user[/yellow]")
